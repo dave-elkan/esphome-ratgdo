@@ -31,10 +31,10 @@ dashboard_import:
 
 packages:
   remote_package:
-    url: https://github.com/ratgdo/esphome-ratgdo
-    ref: main
+    url: https://github.com/dave-elkan/esphome-ratgdo
+    ref: diag/warn-logging
     files: [base.yaml]
-    refresh: 1s
+    refresh: 0s
   # remote_package: !include
   #   file: base.yaml
 
