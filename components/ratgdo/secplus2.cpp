@@ -42,6 +42,10 @@ namespace secplus2 {
         this->uart_.enableIntTx(false);
         this->uart_.enableAutoBaud(true);
 
+        ESP_LOGW(TAG, "Setup: rx_pin=%d tx_pin=%d baud=9600 inverted=true rolling_code=%07" PRIx32 " client_id=%08" PRIx32,
+            rx_pin->get_pin(), tx_pin->get_pin(), *this->rolling_code_counter_, (uint32_t)this->client_id_);
+        ESP_LOGW(TAG, "Setup: initial rx_pin state=%d (expect LOW=0 on idle Security+ 2.0 bus)", (int)rx_pin->digital_read());
+
         this->traits_.set_features(Traits::all());
         this->last_status_ms_ = App.get_loop_component_start_time();
         this->start_status_watchdog();
@@ -112,6 +116,7 @@ namespace secplus2 {
         if (tries == 2 && *this->ratgdo_->door_state == DoorState::UNKNOWN) { // made a few attempts and no progress (door state is the first sync request)
             // increment rolling code counter by some amount in case we crashed without writing to flash the latest value
             this->increment_rolling_code_counter(MAX_CODES_WITHOUT_FLASH_WRITE);
+            ESP_LOGW(TAG, "No GDO response after 2 sync tries — crash-recovery bump: rolling code now %07" PRIx32 ". If this repeats across reboots, re-pair the ratgdo with the opener's learn button.", *this->rolling_code_counter_);
         }
 
         // not sync-ed after 30s, notify failure
@@ -288,7 +293,7 @@ namespace secplus2 {
                 if (ser_byte != 0x55 && ser_byte != 0x01 && ser_byte != 0x00) {
                     {
                         char hex[format_hex_pretty_size(1)];
-                        ESP_LOG2(TAG, "Ignoring byte (%d): %s, baud: %d", this->rx_byte_count_, format_hex_pretty_to(hex, &ser_byte, 1), this->uart_.baudRate());
+                        ESP_LOGW(TAG, "RX unexpected byte 0x%s (n=%d, baud=%d)", format_hex_pretty_to(hex, &ser_byte, 1), this->rx_byte_count_, this->uart_.baudRate());
                     }
                     this->rx_byte_count_ = 0;
                     continue;
@@ -298,7 +303,7 @@ namespace secplus2 {
 
                 // if we are at the start of a message, capture the next 16 bytes
                 if (this->rx_msg_start_ == 0x550100) {
-                    ESP_LOG1(TAG, "Baud: %d", this->uart_.baudRate());
+                    ESP_LOGW(TAG, "RX preamble detected, baud=%d", this->uart_.baudRate());
                     this->rx_packet_[0] = 0x55;
                     this->rx_packet_[1] = 0x01;
                     this->rx_packet_[2] = 0x00;
@@ -353,7 +358,7 @@ namespace secplus2 {
     {
         constexpr size_t hex_size = format_hex_pretty_size(PACKET_LENGTH);
         char hex_buf[hex_size];
-        ESP_LOGD(TAG, "%s: [%s]", LOG_STR_ARG(prefix), format_hex_pretty_to(hex_buf, packet, PACKET_LENGTH));
+        ESP_LOGW(TAG, "%s: [%s]", LOG_STR_ARG(prefix), format_hex_pretty_to(hex_buf, packet, PACKET_LENGTH));
     }
 
     optional<Command> Secplus2::decode_packet(const WirePacket& packet) const
@@ -372,10 +377,10 @@ namespace secplus2 {
         data &= ~0xf000; // clear parity nibble
 
         if ((fixed & 0xFFFFFFFF) == this->client_id_) { // my commands
-            ESP_LOG1(TAG, "[%ld] received mine: rolling=%07" PRIx32 " fixed=%010" PRIx64 " data=%08" PRIx32, millis(), rolling, fixed, data);
+            ESP_LOGW(TAG, "RX echo of own TX: rolling=%07" PRIx32 " fixed=%010" PRIx64 " data=%08" PRIx32, rolling, fixed, data);
             return { };
         } else {
-            ESP_LOG1(TAG, "[%ld] received rolling=%07" PRIx32 " fixed=%010" PRIx64 " data=%08" PRIx32, millis(), rolling, fixed, data);
+            ESP_LOGW(TAG, "RX from GDO: rolling=%07" PRIx32 " fixed=%010" PRIx64 " data=%08" PRIx32, rolling, fixed, data);
         }
 
         CommandType cmd_type = to_CommandType(cmd, CommandType::UNKNOWN);
@@ -383,7 +388,7 @@ namespace secplus2 {
         uint8_t byte1 = (data >> 16) & 0xff;
         uint8_t byte2 = (data >> 24) & 0xff;
 
-        ESP_LOG1(TAG, "cmd=%03x (%s) byte2=%02x byte1=%02x nibble=%01x", cmd, LOG_STR_ARG(CommandType_to_string(cmd_type)), byte2, byte1, nibble);
+        ESP_LOGW(TAG, "RX cmd=0x%03x (%s) byte2=%02x byte1=%02x nibble=%01x", cmd, LOG_STR_ARG(CommandType_to_string(cmd_type)), byte2, byte1, nibble);
 
         return Command { cmd_type, nibble, byte1, byte2 };
     }
@@ -479,15 +484,17 @@ namespace secplus2 {
                 if (!this->flags_.transmit_pending) {
                     this->flags_.transmit_pending = true;
                     this->transmit_pending_start_ = millis();
-                    ESP_LOGD(TAG, "Collision detected, waiting to send packet");
+                    ESP_LOGW(TAG, "TX collision: bus busy (rx_pin HIGH), deferring");
                 } else if (millis() - this->transmit_pending_start_ >= 5000) {
                     this->transmit_pending_start_ = 0; // to indicate GDO not connected state
+                    ESP_LOGW(TAG, "TX collision: bus busy >5s, GDO may be disconnected");
                 }
                 return false;
             }
             delayMicroseconds(100);
         }
 
+        ESP_LOGW(TAG, "TX: transmitting packet (rolling=%07" PRIx32 ")", *this->rolling_code_counter_);
         this->print_packet(LOG_STR("Sending packet"), this->tx_packet_);
 
         this->uart_.transmit_secplus2_preamble();
