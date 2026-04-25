@@ -5,9 +5,9 @@ esphome:
 external_components:
   - source:
       type: git
-      url: https://github.com/ratgdo/esphome-ratgdo
-      ref: main
-    refresh: 1s
+      url: https://github.com/dave-elkan/esphome-ratgdo
+      ref: diag/warn-logging
+    refresh: 0s
   # - source:
   #     type: local
   #     path: components
